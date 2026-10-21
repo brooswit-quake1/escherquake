@@ -553,6 +553,14 @@ void QDECL World_LinkEdict (world_t *w, wedict_t *ent, qboolean touch_triggers)
 
 // set the abs box
 	solid = ent->v->solid;
+#ifdef USERBE
+	if (ent->v->movetype == MOVETYPE_PHYSICS && w->rbe && w->rbe->GetBounds &&
+		w->rbe->GetBounds(w, ent, ent->v->absmin, ent->v->absmax))
+	{
+		// Use the physics shape's rotated bounds for triggers and visibility.
+	}
+	else
+#endif
 	if ((solid == SOLID_BSP||solid == SOLID_BSPTRIGGER) &&
 	(ent->v->angles[0] || ent->v->angles[1] || ent->v->angles[2]) )
 	{	// expand for rotation
@@ -1544,6 +1552,11 @@ static void World_ClipToEverything (world_t *w, moveclip_t *clip)
 		if (touch == clip->passedict)
 			continue;
 
+#ifdef USERBE
+		if (touch->v->movetype == MOVETYPE_PHYSICS && w->rbe_hasphysicsents && w->rbe && w->rbe->TraceMove)
+			continue;
+#endif
+
 		if (clip->type & MOVE_NOMONSTERS && touch->v->solid != SOLID_BSP)
 			continue;
 
@@ -1701,6 +1714,10 @@ static void World_ClipToLinks (world_t *w, areagridlink_t *node, moveclip_t *cli
 			continue;
 		touch->gridareasequence = areagridsequence;
 
+#ifdef USERBE
+		if (touch->v->movetype == MOVETYPE_PHYSICS && w->rbe_hasphysicsents && w->rbe && w->rbe->TraceMove)
+			continue;
+#endif
 		if (touch->v->solid == SOLID_NOT)
 			continue;
 		if (touch == clip->passedict)
@@ -2681,10 +2698,6 @@ trace_t World_Move (world_t *w, vec3_t start, vec3_t mins, vec3_t maxs, vec3_t e
 				}
 			}
 		}
-		/*else if (w->rbe_hasphysicsents && passedict->rbe.body.body)
-		{
-			w->rbe->Trace(w, clip.passedict, clip.start, clip.end, &clip.trace);
-		}*/
 		else
 		{
 #ifdef USEAREAGRID
@@ -2695,6 +2708,11 @@ trace_t World_Move (world_t *w, vec3_t start, vec3_t mins, vec3_t maxs, vec3_t e
 		}
 		World_ClipToLinks(w, &w->portallist, &clip);
 	}
+
+#ifdef USERBE
+	if (w->rbe_hasphysicsents && w->rbe && w->rbe->TraceMove)
+		w->rbe->TraceMove(w, clip.passedict, clip.start, clip.mins, clip.maxs, clip.end, clip.type, clip.hitcontentsmask, &clip.trace);
+#endif
 
 #if defined(HAVE_CLIENT) && defined(CSQC_DAT)
 	{

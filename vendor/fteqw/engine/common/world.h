@@ -200,6 +200,8 @@ typedef struct
 	void (QDECL *PushCommand)(struct world_s *world, rbecommandqueue_t *cmd);
 //	void (QDECL *ExpandBodyAABB)(struct world_s *world, rbebody_t *bodyptr, float *mins, float *maxs);	//expands an aabb to include the size of the body.
 	void (QDECL *Trace) (struct world_s *world, wedict_t *ed, vec3_t start, vec3_t end, trace_t *trace);
+	void (QDECL *TraceMove)(struct world_s *world, wedict_t *ed, vec3_t start, vec3_t mins, vec3_t maxs, vec3_t end, int type, unsigned int contentsmask, trace_t *trace);
+	qboolean (QDECL *GetBounds)(struct world_s *world, wedict_t *ed, vec3_t mins, vec3_t maxs);
 } rigidbodyengine_t;
 #endif
 

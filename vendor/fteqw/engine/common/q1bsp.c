@@ -2515,6 +2515,91 @@ void Q1BSP_Init(void)
 
 //sets up the functions a server needs.
 //fills in bspfuncs_t
+// Q1 BSPs store a partition of space rather than their original brushes. Each
+// solid hull-0 leaf is a convex intersection of the planes along its path.
+// Expose those cells to physics backends, including inline brush submodels.
+#define Q1_PHYSICS_MAX_PLANES 256
+typedef struct
+{
+	model_t *model;
+	void (*callback)(model_t *, q2cbrush_t *, void *);
+	void *user;
+	mplane_t planes[Q1_PHYSICS_MAX_PLANES];
+	q2cbrushside_t sides[Q1_PHYSICS_MAX_PLANES];
+	int count;
+	qboolean failed;
+} q1brushenum_t;
+
+static void Q1BSP_EnumerateSolidCells(q1brushenum_t *ctx, int node, int depth)
+{
+	hull_t *hull = &ctx->model->hulls[0];
+	mclipnode_t *clip;
+	mplane_t *plane;
+	int side;
+	if (node < 0)
+	{
+		if (node == Q1CONTENTS_SOLID)
+		{
+			q2cbrush_t brush;
+			memset(&brush, 0, sizeof(brush));
+			brush.contents = FTECONTENTS_SOLID;
+			brush.numsides = depth;
+			brush.brushside = ctx->sides;
+			VectorCopy(ctx->model->mins, brush.absmins);
+			VectorCopy(ctx->model->maxs, brush.absmaxs);
+			if (ctx->callback)
+				ctx->callback(ctx->model, &brush, ctx->user);
+			ctx->count++;
+		}
+		return;
+	}
+	if (depth == Q1_PHYSICS_MAX_PLANES || node > hull->lastclipnode)
+	{
+		ctx->failed = true;
+		return;
+	}
+	clip = hull->clipnodes + node;
+	plane = hull->planes + clip->planenum;
+	for (side = 0; side < 2; side++)
+	{
+		ctx->planes[depth] = *plane;
+		// A brush's interior is behind every outward-facing plane.
+		if (side == 0)
+		{
+			VectorNegate(plane->normal, ctx->planes[depth].normal);
+			ctx->planes[depth].dist = -plane->dist;
+		}
+		Q1BSP_EnumerateSolidCells(ctx, clip->children[side], depth + 1);
+	}
+}
+
+static int Q1BSP_EnumerateBrushes(model_t *model, void (*callback)(model_t *, q2cbrush_t *, void *), void *user)
+{
+	q1brushenum_t *ctx;
+	int i, result;
+	if (!model || !model->hulls[0].available)
+		return 0;
+	ctx = Z_Malloc(sizeof(*ctx));
+	memset(ctx, 0, sizeof(*ctx));
+	ctx->model = model;
+	ctx->callback = callback;
+	ctx->user = user;
+	for (i = 0; i < Q1_PHYSICS_MAX_PLANES; i++)
+		ctx->sides[i].plane = &ctx->planes[i];
+	// Bound the otherwise infinite exterior solid leaves to the model bounds.
+	for (i = 0; i < 3; i++)
+	{
+		ctx->planes[i*2].normal[i] = 1;
+		ctx->planes[i*2].dist = model->maxs[i] + 1;
+		ctx->planes[i*2+1].normal[i] = -1;
+		ctx->planes[i*2+1].dist = -model->mins[i] + 1;
+	}
+	Q1BSP_EnumerateSolidCells(ctx, model->hulls[0].firstclipnode, 6);
+	result = ctx->failed ? -1 : ctx->count;
+	Z_Free(ctx);
+	return result;
+}
+
 void Q1BSP_SetModelFuncs(model_t *mod)
 {
 #ifdef HAVE_SERVER
@@ -2528,6 +2613,7 @@ void Q1BSP_SetModelFuncs(model_t *mod)
 	mod->funcs.ClusterPVS			= Q1BSP_ClusterPVS;
 	mod->funcs.ClusterPHS			= Q1BSP_ClusterPHS;
 	mod->funcs.NativeTrace			= Q1BSP_Trace;
+	mod->funcs.EnumerateBrushes		= Q1BSP_EnumerateBrushes;
 	mod->funcs.PointContents		= Q1BSP_PointContents;
 
 	mod->funcs.InfoForPoint			= Q1BSP_InfoForPoint;

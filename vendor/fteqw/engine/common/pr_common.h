@@ -736,6 +736,15 @@ unsigned int FTEToDPContents(unsigned int contents);
 #define JOINTTYPE_HINGE2 5
 #define JOINTTYPE_FIXED -1
 
+// corresponds to Jolt Physics EAllowedDOFs
+#define ALLOWEDDOF_ALL 63
+#define ALLOWEDDOF_MOVE_X 1
+#define ALLOWEDDOF_MOVE_Y 2
+#define ALLOWEDDOF_MOVE_Z 4
+#define ALLOWEDDOF_ROTATE_X 8
+#define ALLOWEDDOF_ROTATE_Y 16
+#define ALLOWEDDOF_ROTATE_Z 32
+
 typedef struct
 {
 	int version;
@@ -751,7 +760,7 @@ typedef struct
 	void (QDECL *AngleVectors)(const vec3_t angles, vec3_t forward, vec3_t right, vec3_t up);
 #define plugrbefuncs_name "RBE"
 } rbeplugfuncs_t;
-#define RBEPLUGFUNCS_VERSION 1
+#define RBEPLUGFUNCS_VERSION 2
 
 qofs_t PR_ReadBytesString(char *str);
 
