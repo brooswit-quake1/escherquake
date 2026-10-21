@@ -1265,6 +1265,8 @@ static qboolean rag_instanciate(skelobject_t *sko, doll_t *doll, float *emat, we
 	rbebody_t *body1, *body2;
 	rbejointinfo_t *j;
 	float *absolutes;
+	if (!sko->world || !sko->world->rbe || !sko->world->rbe->RagCreateBody)
+		return false;
 	sko->numbodies = doll->numbodies;
 	sko->body = BZ_Malloc(sizeof(*sko->body) * sko->numbodies);
 	sko->doll = doll;

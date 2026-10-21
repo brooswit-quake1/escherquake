@@ -172,7 +172,7 @@ void() Escher_Frame =
  {
   // Includes players, monsters, pickups, gibs, grenades and projectiles. Excludes pushers/noclip.
   if (!e.gravity_kind && (e.movetype == MOVETYPE_WALK || e.movetype == MOVETYPE_STEP ||
-      e.movetype == MOVETYPE_TOSS || e.movetype == MOVETYPE_BOUNCE || e.movetype == MOVETYPE_FLYMISSILE))
+      e.movetype == MOVETYPE_TOSS || e.movetype == MOVETYPE_BOUNCE || e.movetype == MOVETYPE_FLYMISSILE || e.movetype == 32))
    Escher_Update(e, frametime);
   e = nextent(e);
  }

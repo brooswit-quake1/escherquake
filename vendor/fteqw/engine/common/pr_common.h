@@ -760,7 +760,7 @@ typedef struct
 	void (QDECL *AngleVectors)(const vec3_t angles, vec3_t forward, vec3_t right, vec3_t up);
 #define plugrbefuncs_name "RBE"
 } rbeplugfuncs_t;
-#define RBEPLUGFUNCS_VERSION 1
+#define RBEPLUGFUNCS_VERSION 2
 
 qofs_t PR_ReadBytesString(char *str);
 

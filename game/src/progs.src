@@ -25,6 +25,7 @@
 #include "subs.qc"
 #include "engine.qc"
 #include "escher.qc"
+#include "jolt.qc"
 #include "effects.qc"
 #include "obituary.qc"
 #include "combat.qc"

@@ -459,7 +459,7 @@ dBodyID         (ODE_API *dJointGetBody)(dJointID, int index);
 //void            (ODE_API *dJointSetFeedback)(dJointID, dJointFeedback *);
 //dJointFeedback *(ODE_API *dJointGetFeedback)(dJointID);
 void            (ODE_API *dJointSetBallAnchor)(dJointID, dReal x, dReal y, dReal z);
-//void            (ODE_API *dJointSetBallAnchor2)(dJointID, dReal x, dReal y, dReal z);
+void            (ODE_API *dJointSetBallAnchor2)(dJointID, dReal x, dReal y, dReal z);
 void            (ODE_API *dJointSetBallParam)(dJointID, int parameter, dReal value);
 void            (ODE_API *dJointSetHingeAnchor)(dJointID, dReal x, dReal y, dReal z);
 //void            (ODE_API *dJointSetHingeAnchorDelta)(dJointID, dReal x, dReal y, dReal z, dReal ax, dReal ay, dReal az);
@@ -887,16 +887,16 @@ static dllfunction_t odefuncs[] =
 //	{"dBodyGetNextGeom",							(void **) &dBodyGetNextGeom},
 //	{"dBodySetDampingDefaults",						(void **) &dBodySetDampingDefaults},
 //	{"dBodyGetLinearDamping",						(void **) &dBodyGetLinearDamping},
-	{"dBodySetLinearDamping",						(void **) &dBodySetLinearDamping},
+	{(void **) &dBodySetLinearDamping, "dBodySetLinearDamping"},
 //	{"dBodyGetAngularDamping",						(void **) &dBodyGetAngularDamping},
-	{"dBodySetAngularDamping",						(void **) &dBodySetAngularDamping},
+	{(void **) &dBodySetAngularDamping, "dBodySetAngularDamping"},
 //	{"dBodySetDamping",								(void **) &dBodySetDamping},
 //	{"dBodyGetLinearDampingThreshold",				(void **) &dBodyGetLinearDampingThreshold},
 //	{"dBodySetLinearDampingThreshold",				(void **) &dBodySetLinearDampingThreshold},
 //	{"dBodyGetAngularDampingThreshold",				(void **) &dBodyGetAngularDampingThreshold},
 //	{"dBodySetAngularDampingThreshold",				(void **) &dBodySetAngularDampingThreshold},
 //	{"dBodyGetMaxAngularSpeed",						(void **) &dBodyGetMaxAngularSpeed},
-	{"dBodySetMaxAngularSpeed",						(void **) &dBodySetMaxAngularSpeed},
+	{(void **) &dBodySetMaxAngularSpeed, "dBodySetMaxAngularSpeed"},
 //	{"dBodyGetGyroscopicMode",						(void **) &dBodyGetGyroscopicMode},
 //	{"dBodySetGyroscopicMode",						(void **) &dBodySetGyroscopicMode},
 	{(void **) &dJointCreateBall,					"dJointCreateBall"},
@@ -929,7 +929,7 @@ static dllfunction_t odefuncs[] =
 //	{"dJointSetFeedback",							(void **) &dJointSetFeedback},
 //	{"dJointGetFeedback",							(void **) &dJointGetFeedback},
 	{(void **) &dJointSetBallAnchor,				"dJointSetBallAnchor"},
-//	{"dJointSetBallAnchor2",						(void **) &dJointSetBallAnchor2},
+	{(void **) &dJointSetBallAnchor2, "dJointSetBallAnchor2"},
 	{(void **) &dJointSetBallParam,					"dJointSetBallParam"},
 	{(void **) &dJointSetHingeAnchor,				"dJointSetHingeAnchor"},
 //	{"dJointSetHingeAnchorDelta",					(void **) &dJointSetHingeAnchorDelta},

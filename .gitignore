@@ -20,3 +20,10 @@ tests/qwprogs.dat
 /*.cfg
 
 /id1
+
+/game/screenshots/
+/game/config.cfg
+/game/fte.cfg
+/game/saves/
+/conhistory.txt
+/installed.lst

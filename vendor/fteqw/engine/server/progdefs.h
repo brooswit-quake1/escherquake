@@ -585,6 +585,9 @@ typedef struct
 	float gravity;
 	float friction;
 	float alloweddof;
+	int jolt_geomtype, jolt_movetype;
+	float jolt_scale;
+	vec3_t jolt_gravitydir;
 	int modelindex;
 	vec_t movelimit; // smallest component of (maxs[]-mins[])
 	float offsetmatrix[16];

@@ -4,13 +4,16 @@ An experimental Quake 1 gravity playground built on FTEQW. Full engine source an
 
 This is a foundation, not a finished arbitrary-gravity conversion of Quake. The player collision hull remains axis-aligned, and stock monster AI, liquids and some scripted movement still assume world Z. Read [the engine/game boundary and limitations](docs/architecture.md) before expanding it.
 
+The `phase-one/jolt` branch continues FTE PR 414 with a Jolt rigid-body backend and a runnable sandbox. See [phase-one build and launch instructions](docs/jolt.md). Gravity-aligned player collision remains phase two.
+
 ## Build (Linux)
 
-On Debian/Ubuntu install `build-essential zlib1g-dev libpng-dev libjpeg-dev libx11-dev libgl-dev libxcursor-dev libxrandr-dev libxxf86vm-dev libxrender-dev libxfixes-dev libxi-dev libxss-dev libxv-dev libasound2-dev libvorbis-dev libfreetype-dev libopus-dev libspeex-dev libspeexdsp-dev`.
+On Debian/Ubuntu install `build-essential cmake zlib1g-dev libpng-dev libjpeg-dev libx11-dev libgl-dev libxcursor-dev libxrandr-dev libxxf86vm-dev libxrender-dev libxfixes-dev libxi-dev libxss-dev libxv-dev libasound2-dev libvorbis-dev libfreetype-dev libopus-dev libspeex-dev libspeexdsp-dev`.
 
 ```sh
 make all JOBS=4
 make test JOBS=4
+make test-jolt JOBS=4
 ```
 
 The binaries are `vendor/fteqw/engine/release/fteqw-gl` and `fteqw-sv`. Game code builds to `game/qwprogs.dat`. CI builds the same targets and uploads a Linux artifact. FTE's upstream build files also support other platforms; those builds have not been verified here.

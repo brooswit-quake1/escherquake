@@ -12,10 +12,52 @@ See gl_terrain.h for terminology, networking notes, etc.
 #include "glquake.h"
 #include "shader.h"
 #include "com_mesh.h"
+#include "com_bih.h"
 
 #include "pr_common.h"
 
 #include "gl_terrain.h"
+
+// Expose the original brush planes when loading an uncompiled .map. Heightfield
+// sections and patches need their own mesh adapter; this handles brush geometry.
+static int Heightmap_EnumerateBrushes(model_t *model, void (*callback)(model_t *, q2cbrush_t *, void *), void *user)
+{
+	heightmap_t *hm = model->terrain;
+	unsigned int i, p;
+	int count = 0;
+	if (!hm)
+		return 0;
+	for (i = 0; i < hm->numbrushes; i++)
+	{
+		brushes_t *source = &hm->wbrushes[i];
+		q2cbrush_t brush;
+		mplane_t *planes;
+		q2cbrushside_t *sides;
+		if (source->patch || !source->numplanes)
+			continue;
+		planes = BZ_Malloc(source->numplanes * sizeof(*planes));
+		sides = BZ_Malloc(source->numplanes * sizeof(*sides));
+		memset(&brush, 0, sizeof(brush));
+		memset(sides, 0, source->numplanes * sizeof(*sides));
+		for (p = 0; p < source->numplanes; p++)
+		{
+			VectorCopy(source->planes[p], planes[p].normal);
+			planes[p].dist = source->planes[p][3];
+			sides[p].plane = &planes[p];
+		}
+		brush.contents = source->contents;
+		brush.numsides = source->numplanes;
+		brush.brushside = sides;
+		VectorCopy(source->mins, brush.absmins);
+		VectorCopy(source->maxs, brush.absmaxs);
+		if (callback)
+			callback(model, &brush, user);
+		BZ_Free(sides);
+		BZ_Free(planes);
+		count++;
+	}
+	return count;
+}
 
 static plugterrainfuncs_t terrainfuncs;
 
@@ -8146,6 +8188,7 @@ qboolean Terr_ReformEntitiesLump(model_t *mod, heightmap_t *hm, char *entities)
 							ClearBounds(submod->mins, submod->maxs);
 
 							submod->funcs.NativeTrace			= Heightmap_Trace_Test;
+							submod->funcs.EnumerateBrushes = Heightmap_EnumerateBrushes;
 							submod->funcs.PointContents			= Heightmap_PointContents;
 							submod->funcs.NativeContents		= Heightmap_NativeBoxContents;
 							submod->funcs.LightPointValues		= Heightmap_LightPointValues;
@@ -8695,6 +8738,7 @@ qboolean QDECL Terr_LoadTerrainModel (model_t *mod, void *buffer, size_t bufsize
 	}
 
 	mod->funcs.NativeTrace			= Heightmap_Trace_Test;
+	mod->funcs.EnumerateBrushes = Heightmap_EnumerateBrushes;
 	mod->funcs.PointContents		= Heightmap_PointContents;
 
 	mod->funcs.NativeContents		= Heightmap_NativeBoxContents;

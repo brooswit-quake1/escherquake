@@ -1,0 +1,13 @@
+#define worldspawn Original_worldspawn
+#define StartFrame Original_StartFrame
+#define ClientDisconnect Original_ClientDisconnect
+#define PlayerPreThink Original_PlayerPreThink
+#define PlayerPostThink Original_PlayerPostThink
+#include "../game/src/progs.src"
+#undef worldspawn
+#undef StartFrame
+#undef ClientDisconnect
+#undef PlayerPreThink
+#undef PlayerPostThink
+#pragma PROGS_DAT ../build/jolttest/qwprogs.dat
+#include "jolt_tests.qc"

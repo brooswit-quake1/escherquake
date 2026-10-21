@@ -46,6 +46,14 @@ def generate(destination):
     content += entity({"classname":"trigger_gravity", "targetname":"wedge_test",
                        "gravity_disabled":"1"}, wedge)
     (destination / "escher_lab.map").write_text(content)
+    sandbox = content
+    for i in range(6):
+        sandbox += entity({"classname":"misc_jolt_box", "origin":f"{-800+(i%3)*40} {-180+(i//3)*40} {100+(i//3)*50}", "angles":"10 20 15"})
+    for i in range(4):
+        sandbox += entity({"classname":"misc_jolt_capsule", "origin":f"{-660+i*50} 120 150", "angles":f"{i*30} 20 0"})
+    sandbox += entity({"classname":"misc_jolt_capsule", "origin":"-400 150 300", "angles":"60 0 0"})
+    (destination / "jolt_lab.map").write_text(sandbox)
+
 
 
 def textures(destination):

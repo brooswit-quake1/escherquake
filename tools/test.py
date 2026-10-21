@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build"
 BUILD.mkdir(exist_ok=True)
 generate(BUILD / "testgame/maps")
+(BUILD / "testgame/quake.rc").write_text("// Isolated test startup.\n")
 
 
 def run(command, cwd=ROOT):

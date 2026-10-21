@@ -5,32 +5,13 @@ started work on May 14 2025
 */
 
 /*
-# TODO
-## last updated 2025-06-03
-- [ ] sort out frametime issues, especially if sv_nqplayerphysics == 0
-- [ ] sort out native tracelines (requires engine changes)
-- [ ] implement the rest of the joint types (JOINTTYPE_UNIVERSAL,
-JOINTTYPE_HINGE2)
-- [ ] implement new joint types based on what Jolt offers (Pulley, Gear)
-- [x] implement axis-lock for 2d games
-- [ ] build brush entities as multiple convex solids if they have brushes in
-the BIH data, otherwise build them as trisoup (if world) or build a single
-convex solid (if submodel)
-- [ ] implement ragdoll callbacks
-- [ ] figure out how to do buoyency in a way that doesn't suck
-- [ ] hook up particle system to client's RBE functions for physically
-simulated particles (CL_SpawnSpriteEffect in cl_tent.c)
-- [ ] figure out why loading a savegame causes a segfault
-- [x] test if demos work
-- [ ] add a debug drawing cvar for Jolt convex hulls
-- [ ] add a QC builtin for supplying a convex hull for a given entity or modelindex
-- [ ] make sure bullet and ode plugins can still work (as well as they ever did)
-- [x] add an entity field for locking movement to particular to axes, should
-correspond to Jolt's AllowedDOFs enum.
-- [ ] think of a way for QC to create Jolt CompoundShapes
-- [ ] update EnumerateBrushes stuff to address submodels
-- [x] update EnumerateBrushes stuff to work with Q2BSP and Q3BSP
-- [ ] destroy associated constraints when bodys are deleted to prevent crashes
+Phase-one stabilization continues FTE PR 414. Core timing, tracing, shape
+ownership, capsule axes/dimensions, BSP compounds, per-body gravity, bounds,
+and save/load are covered by the engine integration tests.
+
+Remaining feature work: ragdolls, buoyancy, simulated particles, debug drawing,
+QC-authored hulls/compounds, universal/hinge2 joints and extended joint types.
+See docs/jolt.md in EscherQuake for scope, provenance and known limits.
 */
 
 /*
@@ -80,6 +61,16 @@ movement and rotation of rigidbody entities
 #include "Jolt/Physics/Collision/Shape/MeshShape.h"
 #include "Jolt/Physics/Collision/Shape/ConvexHullShape.h"
 #include "Jolt/Physics/Collision/Shape/StaticCompoundShape.h"
+#include "Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h"
+#include "Jolt/Physics/Constraints/TwoBodyConstraint.h"
+#include <vector>
+#include <array>
+#include <algorithm>
+#include <mutex>
+#include "Jolt/Physics/Collision/ContactListener.h"
+#include "Jolt/Physics/Collision/CollisionCollectorImpl.h"
+#include "Jolt/Physics/Collision/ShapeCast.h"
+#include <cmath>
 #include "Jolt/Physics/Body/BodyCreationSettings.h"
 #include "Jolt/Physics/Body/BodyActivationListener.h"
 #include "Jolt/Physics/Constraints/PointConstraint.h"
@@ -409,6 +400,48 @@ typedef struct joltcontext {
 		}
 	} object_vs_broadphase_layer_filter;
 
+	double accumulator = 0;
+	struct ContactEvent
+	{
+		JPH::BodyID a, b;
+		JPH::RVec3 point;
+		JPH::Vec3 normal;
+	};
+	std::mutex contact_mutex;
+	std::vector<ContactEvent> contacts;
+
+	class ContactFilter : public JPH::ContactListener
+	{
+	public:
+		world_t *world = nullptr;
+		joltcontext *ctx = nullptr;
+		JPH::ValidateResult OnContactValidate(const JPH::Body &a, const JPH::Body &b, JPH::RVec3Arg, const JPH::CollideShapeResult &) override
+		{
+			const auto na = a.GetUserData(), nb = b.GetUserData();
+			if (na >= world->num_edicts || nb >= world->num_edicts)
+				return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
+			auto *ea = WEDICT_NUM_PB(world->progs, na);
+			auto *eb = WEDICT_NUM_PB(world->progs, nb);
+			if (!((int)ea->xv->dimension_solid & (int)eb->xv->dimension_hit) ||
+				!((int)eb->xv->dimension_solid & (int)ea->xv->dimension_hit) ||
+				(ea->v->owner && PROG_TO_WEDICT(world->progs, ea->v->owner) == eb) ||
+				(eb->v->owner && PROG_TO_WEDICT(world->progs, eb->v->owner) == ea))
+				return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
+			return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
+		}
+		void OnContactAdded(const JPH::Body &a, const JPH::Body &b, const JPH::ContactManifold &manifold, JPH::ContactSettings &) override
+		{
+			std::lock_guard<std::mutex> guard(ctx->contact_mutex);
+			if (ctx->contacts.size() < max_contact_constraints)
+				ctx->contacts.push_back({a.GetID(), b.GetID(), manifold.GetWorldSpaceContactPointOn1(0), manifold.mWorldSpaceNormal});
+		}
+		void OnContactPersisted(const JPH::Body &a, const JPH::Body &b, const JPH::ContactManifold &manifold, JPH::ContactSettings &settings) override
+		{
+			OnContactAdded(a, b, manifold, settings);
+		}
+
+	} contact_filter;
+
 	qboolean broadphase_optimized;
 
 	rbecommandqueue_t *cmdqueuehead;
@@ -418,6 +451,12 @@ typedef struct joltcontext {
 static void QDECL World_Jolt_End(world_t *world)
 {
 	joltcontext_t *ctx = (joltcontext_t *)world->rbe;
+	while (ctx->cmdqueuehead)
+	{
+		rbecommandqueue_t *cmd = ctx->cmdqueuehead;
+		ctx->cmdqueuehead = cmd->next;
+		BZ_Free(cmd);
+	}
 	delete ctx;
 	world->rbe = nullptr;
 }
@@ -446,20 +485,17 @@ static void QDECL World_Jolt_RemoveFromEntity(world_t *world, wedict_t *ed)
 	ed->rbe.body.body = nullptr;
 	if (body)
 	{
-#if 0
-		// remove constraints that use this body
-		JPH::Constraints constraints = ctx->physics_system.GetConstraints();
-		for (auto &c : constraints)
+// Remove joint entity references before Jolt destroys their bodies.
+		for (unsigned int i = 0; i < world->num_edicts; ++i)
 		{
-			JPH::Constraint *constraint = c.GetPtr();
-			wedict_t *joint = WEDICT_NUM_PB(world->progs, constraint->GetUserData());
-			if (joint && (joint->v->enemy == NUM_FOR_EDICT(world->progs, ed) || joint->v->aiment == NUM_FOR_EDICT(world->progs, ed)))
+			wedict_t *joint = WEDICT_NUM_PB(world->progs, i);
+			if (joint->rbe.joint.joint)
 			{
-				ctx->physics_system.RemoveConstraint(constraint);
-				c = nullptr;
+				auto *constraint = static_cast<JPH::TwoBodyConstraint *>(joint->rbe.joint.joint);
+				if (constraint->GetBody1() == body || constraint->GetBody2() == body)
+					World_Jolt_RemoveJointFromEntity(world, joint);
 			}
 		}
-#endif
 
 		// remove body
 		body_interface.RemoveBody(body->GetID());
@@ -468,10 +504,8 @@ static void QDECL World_Jolt_RemoveFromEntity(world_t *world, wedict_t *ed)
 
 	geom = (JPH::Shape *)ed->rbe.body.geom;
 	ed->rbe.body.geom = nullptr;
-	if (ed->rbe.body.geom)
-	{
-		delete geom;
-	}
+	if (geom)
+		geom->Release();
 
 	// entity is not physics controlled, free any physics data
 	rbefuncs->ReleaseCollisionMesh(ed);
@@ -529,32 +563,27 @@ struct enumeratebrushes_userdata_t {
 	JPH::Array<JPH::ConvexHullShapeSettings *> convex_hull_shape_settings;
 
 	enumeratebrushes_userdata_t() = default;
-	~enumeratebrushes_userdata_t() = default;
-#if 0
 	~enumeratebrushes_userdata_t()
 	{
-		for (auto &elem : convex_hull_shape_settings)
-			delete elem;
+		// Settings are reference counted by StaticCompoundShapeSettings.
+		convex_hull_shape_settings.clear();
 	}
-#endif
 };
 
 static void QDECL EnumerateBrushes_Callback(model_t *model, q2cbrush_t *brush, void *user)
 {
 	enumeratebrushes_userdata_t *userdata = (enumeratebrushes_userdata_t *)user;
-	joltcontext_t *ctx = (joltcontext_t *)userdata->world->rbe;
-	JPH::BodyInterface &body_interface = ctx->physics_system.GetBodyInterface();
 
-	if (!brush->numsides)
+	if (!brush->numsides || !(brush->contents & FTECONTENTS_SOLID))
 		return;
 
 	JPH::ConvexHullShapeSettings *convex_hull_shape_settings = new JPH::ConvexHullShapeSettings;
 
 	// copy planes into a linear array
-	vec4_t planes[brush->numsides];
+	std::vector<std::array<float, 4>> planes(brush->numsides);
 	for (int i = 0; i < brush->numsides; i++)
 	{
-		VectorCopy(brush->brushside[i].plane->normal, planes[i]);
+		VectorCopy(brush->brushside[i].plane->normal, planes[i].data());
 		planes[i][3] = brush->brushside[i].plane->dist;
 	}
 
@@ -562,11 +591,11 @@ static void QDECL EnumerateBrushes_Callback(model_t *model, q2cbrush_t *brush, v
 	vecV_t facepoints[JPH::ConvexHullShape::cMaxPointsInHull];
 	for (int i = 0; i < brush->numsides; i++)
 	{
-		int numpoints = Fragment_ClipPlaneToBrush(facepoints, countof(facepoints), planes, sizeof(*planes), brush->numsides, planes[i]);
+		int numpoints = Fragment_ClipPlaneToBrush(facepoints, countof(facepoints), planes.data(), sizeof(planes[0]), brush->numsides, planes[i].data());
 
 		// add to convex hull settings
 		for (int j = 0; j < numpoints; j++)
-			convex_hull_shape_settings->mPoints.push_back(JPH::Vec3(facepoints[j][0], facepoints[j][1], facepoints[j][2]) * InchesToMeters);
+			convex_hull_shape_settings->mPoints.push_back(JPH::Vec3(facepoints[j][0], facepoints[j][1], facepoints[j][2]) * InchesToMeters * (userdata->ed->xv->scale ? userdata->ed->xv->scale : 1));
 	}
 
 	if (!convex_hull_shape_settings->mPoints.size())
@@ -575,12 +604,14 @@ static void QDECL EnumerateBrushes_Callback(model_t *model, q2cbrush_t *brush, v
 		return;
 	}
 
-	// set radius
-	if (userdata->model->radius)
-		convex_hull_shape_settings->mMaxConvexRadius = userdata->model->radius * InchesToMeters;
-	else
-		convex_hull_shape_settings->mMaxConvexRadius = RadiusFromBounds(userdata->model->mins, userdata->model->maxs) * InchesToMeters;
+	convex_hull_shape_settings->mMaxConvexRadius = 0;
 
+	auto result = convex_hull_shape_settings->Create();
+	if (result.HasError())
+	{
+		delete convex_hull_shape_settings;
+		return; // BSP partitions can include zero-volume cells.
+	}
 	userdata->convex_hull_shape_settings.push_back(convex_hull_shape_settings);
 	userdata->static_compound_shape_settings.AddShape(JPH::Vec3::sZero(), JPH::Quat::sIdentity(), convex_hull_shape_settings);
 }
@@ -588,13 +619,12 @@ static void QDECL EnumerateBrushes_Callback(model_t *model, q2cbrush_t *brush, v
 static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 {
 	JPH::Body *body = nullptr;
-	JPH::Shape *geom = nullptr;
+	JPH::Ref<JPH::Shape> geom;
 	JPH::MeshShapeSettings mesh_shape_settings;
 	JPH::ConvexHullShapeSettings convex_hull_shape_settings;
-	JPH::ShapeSettings *shape_settings = nullptr;
 	enumeratebrushes_userdata_t enumeratebrushes_userdata;
-	vec3_t maxs;
-	vec3_t mins;
+	vec3_t maxs = {0, 0, 0};
+	vec3_t mins = {0, 0, 0};
 	vec3_t center;
 	vec3_t size;
 	vec3_t origin;
@@ -618,12 +648,20 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 
 	// FIXME: find a better way to prevent this crash?
 	if (ed->v->movetype == MOVETYPE_NOCLIP)
+	{
+		World_Jolt_RemoveFromEntity(world, ed);
 		return;
+	}
 
 	// get entity fields
 	VectorCopy(ed->v->origin, origin);
 	geomtype = ed->xv->geomtype;
 	solid = ed->v->solid;
+	if (solid == SOLID_NOT || solid == SOLID_TRIGGER || solid == SOLID_BSPTRIGGER || solid == SOLID_LADDER || solid == SOLID_PORTAL)
+	{
+		World_Jolt_RemoveFromEntity(world, ed);
+		return;
+	}
 	movetype = ed->v->movetype;
 	if (ed->xv->scale)
 		scale = ed->xv->scale;
@@ -719,15 +757,17 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 
 	// we don't allow point-size physics objects...
 	VectorSubtract(maxs, mins, size);
-	if (DotProduct(size, size) == 0)
+	if (size[0] <= 0 || size[1] <= 0 || size[2] <= 0)
 	{
 		// Con_Printf("Jolt: entity %i (classname %s) is point sized\n", NUM_FOR_EDICT(world->progs, (edict_t *)ed), PR_GetString(world->progs, ed->v->classname));
 		World_Jolt_RemoveFromEntity(world, ed);
 		return;
 	}
 
+	// Rebuild on mass/motion changes too, removing dependent constraints first.
+	mass = movetype == MOVETYPE_PHYSICS ? std::max(0.001f, mass) : 0;
 	// check if we need to create or replace the geom
-	if (!ed->rbe.physics || !VectorCompare(ed->rbe.mins, mins) || !VectorCompare(ed->rbe.maxs, maxs) || ed->rbe.modelindex != modelindex)
+	if (!ed->rbe.physics || !VectorCompare(ed->rbe.mins, mins) || !VectorCompare(ed->rbe.maxs, maxs) || ed->rbe.modelindex != modelindex || ed->rbe.jolt_geomtype != geomtype || ed->rbe.jolt_movetype != movetype || ed->rbe.jolt_scale != scale || ed->rbe.mass != mass)
 	{
 		modified = qtrue;
 		World_Jolt_RemoveFromEntity(world, ed);
@@ -735,6 +775,9 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 		VectorCopy(mins, ed->rbe.mins);
 		VectorCopy(maxs, ed->rbe.maxs);
 		ed->rbe.modelindex = modelindex;
+		ed->rbe.jolt_geomtype = geomtype;
+		ed->rbe.jolt_movetype = movetype;
+		ed->rbe.jolt_scale = scale;
 		VectorAvg(mins, maxs, center);
 		ed->rbe.movelimit = std::min(size[0], std::min(size[1], size[2]));
 		ed->rbe.mass = mass;
@@ -760,17 +803,15 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 				}
 				if (enumeratebrushes_userdata.convex_hull_shape_settings.size() > 0)
 				{
+					VectorClear(center); // brush vertices are already model-relative
 					JPH::ShapeSettings::ShapeResult result;
 					if (enumeratebrushes_userdata.static_compound_shape_settings.mSubShapes.size() >= 2)
 					{
 						geom = new JPH::StaticCompoundShape(enumeratebrushes_userdata.static_compound_shape_settings, ctx->temp_allocator, result);
-						enumeratebrushes_userdata.static_compound_shape_settings.SetEmbedded();
-						shape_settings = (JPH::ShapeSettings *)&enumeratebrushes_userdata.static_compound_shape_settings;
 					}
 					else
 					{
 						geom = new JPH::ConvexHullShape(*enumeratebrushes_userdata.convex_hull_shape_settings[0], result);
-						shape_settings = (JPH::ShapeSettings *)enumeratebrushes_userdata.convex_hull_shape_settings[0];
 					}
 
 					if (result.HasError())
@@ -824,8 +865,6 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 							World_Jolt_RemoveFromEntity(world, ed);
 							return;
 						}
-						mesh_shape_settings.SetEmbedded();
-						shape_settings = (JPH::ShapeSettings *)&mesh_shape_settings;
 					}
 					else
 					{
@@ -835,11 +874,7 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 						for (int i = 0; i < ed->rbe.numvertices; i++)
 							convex_hull_shape_settings.mPoints.push_back(JPH::Vec3(ed->rbe.vertex3f[i * 3 + 0], ed->rbe.vertex3f[i * 3 + 1], ed->rbe.vertex3f[i * 3 + 2]) * InchesToMeters);
 
-						// set radius
-						if (model->radius)
-							convex_hull_shape_settings.mMaxConvexRadius = model->radius * InchesToMeters;
-						else
-							convex_hull_shape_settings.mMaxConvexRadius = RadiusFromBounds(model->mins, model->maxs) * InchesToMeters;
+						convex_hull_shape_settings.mMaxConvexRadius = 0;
 
 						// create shape
 						JPH::ShapeSettings::ShapeResult result;
@@ -850,8 +885,6 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 							World_Jolt_RemoveFromEntity(world, ed);
 							return;
 						}
-						convex_hull_shape_settings.SetEmbedded();
-						shape_settings = (JPH::ShapeSettings *)&convex_hull_shape_settings;
 					}
 				}
 				break;
@@ -859,7 +892,7 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 
 			case GEOMTYPE_BOX:
 			{
-				geom = new JPH::BoxShape(JPH::Vec3Arg(size[0], size[1], size[2]) * 0.5 * InchesToMeters);
+				geom = new JPH::BoxShape(JPH::Vec3Arg(size[0], size[1], size[2]) * 0.5 * InchesToMeters, 0);
 				break;
 			}
 
@@ -898,13 +931,13 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 				length = size[axisindex] - radius * 2;
 
 				if (length <= 0)
+					geom = new JPH::SphereShape(std::min(radius, size[axisindex] * 0.5f) * InchesToMeters);
+				else
 				{
-					radius -= (1 - length) * 0.5;
-					length = 1;
+					geom = new JPH::CapsuleShape(length * 0.5f * InchesToMeters, radius * InchesToMeters);
+					geom = new JPH::RotatedTranslatedShape(JPH::Vec3::sZero(),
+						JPH::Quat::sFromTo(JPH::Vec3::sAxisY(), (axisindex == 0 ? JPH::Vec3::sAxisX() : axisindex == 1 ? JPH::Vec3::sAxisY() : JPH::Vec3::sAxisZ())), geom);
 				}
-
-				// TODO: check if length should be divided by 2
-				geom = new JPH::CapsuleShape(length * InchesToMeters, radius * InchesToMeters);
 				break;
 			}
 
@@ -942,8 +975,10 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 					length = 1;
 				}
 
-				// TODO: check if length should be divided by 2
-				geom = new JPH::CylinderShape(length * InchesToMeters, radius * InchesToMeters);
+				// Jolt takes the half-height of the complete cylinder.
+				geom = new JPH::CylinderShape(size[axisindex] * 0.5f * InchesToMeters, radius * InchesToMeters, 0);
+				geom = new JPH::RotatedTranslatedShape(JPH::Vec3::sZero(),
+					JPH::Quat::sFromTo(JPH::Vec3::sAxisY(), (axisindex == 0 ? JPH::Vec3::sAxisX() : axisindex == 1 ? JPH::Vec3::sAxisY() : JPH::Vec3::sAxisZ())), geom);
 				break;
 			}
 
@@ -955,27 +990,14 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 			}
 		}
 
-		ed->rbe.body.geom = (void *)geom;
+		// Every stored shape owns one reference, independent of the body's reference.
+		// Keep the QC origin as the transform origin, even for asymmetric bounds.
+		if (DotProduct(center, center) != 0)
+			geom = new JPH::RotatedTranslatedShape(JPH::Vec3(center[0], center[1], center[2]) * InchesToMeters, JPH::Quat::sIdentity(), geom);
+		geom->AddRef();
+		ed->rbe.body.geom = (void *)geom.GetPtr();
 	}
 
-	// non-moving objects need to be static objects (and thus need 0 mass)
-	if (movetype != MOVETYPE_PHYSICS && movetype != MOVETYPE_WALK)
-		mass = 0;
-
-	// if the mass changes, we'll need to create a new body (but not the shape, so invalidate the current one)
-	if (ed->rbe.mass != mass)
-	{
-		ed->rbe.mass = mass;
-
-		body = (JPH::Body *)ed->rbe.body.body;
-		if (body)
-		{
-			body_interface.RemoveBody(body->GetID());
-			body_interface.DestroyBody(body->GetID());
-		}
-
-		ed->rbe.body.body = nullptr;
-	}
 
 	if (movetype == MOVETYPE_PHYSICS && ed->rbe.mass)
 	{
@@ -984,17 +1006,21 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 			// Con_Printf("created: %s\n", PR_GetString(world->progs, ed->v->classname));
 			// setup
 			JPH::BodyCreationSettings body_creation_settings;
-			if (shape_settings)
-				body_creation_settings.SetShapeSettings(shape_settings);
-			else
-				body_creation_settings.SetShape((JPH::Shape *)ed->rbe.body.geom);
+			body_creation_settings.SetShape((JPH::Shape *)ed->rbe.body.geom);
 			body_creation_settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
 			body_creation_settings.mMassPropertiesOverride.mMass = ed->rbe.mass;
 			body_creation_settings.mObjectLayer = LAYER_MOVING;
 			body_creation_settings.mMotionType = JPH::EMotionType::Dynamic;
+			body_creation_settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
 
 			// create body
 			body = body_interface.CreateBody(body_creation_settings);
+			if (!body)
+			{
+				Con_Printf("Jolt: body allocation failed\n");
+				World_Jolt_RemoveFromEntity(world, ed);
+				return;
+			}
 			body_interface.SetUserData(body->GetID(), NUM_FOR_EDICT(world->progs, ed));
 
 			//motion threshhold should be speed/physicsframerate.
@@ -1005,7 +1031,7 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 			//body->setCcdSweptSphereRadius((geomsize[0]+geomsize[1]+geomsize[2])*(0.5/3));
 
 			// add to world
-			body_interface.AddBody(body->GetID(), JPH::EActivation::DontActivate);
+			body_interface.AddBody(body->GetID(), body->IsStatic() ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
 			modified = qtrue;
 			ed->rbe.body.body = (void *)body;
 		}
@@ -1017,10 +1043,7 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 			// Con_Printf("created: %s\n", PR_GetString(world->progs, ed->v->classname));
 			// setup
 			JPH::BodyCreationSettings body_creation_settings;
-			if (shape_settings)
-				body_creation_settings.SetShapeSettings(shape_settings);
-			else
-				body_creation_settings.SetShape((JPH::Shape *)ed->rbe.body.geom);
+			body_creation_settings.SetShape((JPH::Shape *)ed->rbe.body.geom);
 			body_creation_settings.mOverrideMassProperties = JPH::EOverrideMassProperties::MassAndInertiaProvided;
 			body_creation_settings.mMassPropertiesOverride.mMass = ed->rbe.mass;
 			if (ed->rbe.mass)
@@ -1036,10 +1059,16 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 
 			// create body
 			body = body_interface.CreateBody(body_creation_settings);
+			if (!body)
+			{
+				Con_Printf("Jolt: body allocation failed\n");
+				World_Jolt_RemoveFromEntity(world, ed);
+				return;
+			}
 			body_interface.SetUserData(body->GetID(), NUM_FOR_EDICT(world->progs, ed));
 
 			// add to world
-			body_interface.AddBody(body->GetID(), JPH::EActivation::DontActivate);
+			body_interface.AddBody(body->GetID(), body->IsStatic() ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
 			modified = qtrue;
 			ed->rbe.body.body = (void *)body;
 		}
@@ -1073,7 +1102,7 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 		VectorNegate(left,left);
 		// convert single-axis rotations in avelocity to spinvelocity
 		// FIXME: untested math - check signs
-		VectorSet(spinvelocity, DEG2RAD(qavelocity[YAW]), DEG2RAD(qavelocity[ROLL]), DEG2RAD(qavelocity[PITCH]));
+		VectorSet(spinvelocity, DEG2RAD(qavelocity[ROLL]), DEG2RAD(qavelocity[PITCH]), DEG2RAD(qavelocity[YAW]));
 	}
 
 	// compatibility for legacy entities
@@ -1098,67 +1127,60 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 		ed->xv->gravity != ed->rbe.gravity ||
 		ed->xv->damp_linear != ed->rbe.damp_linear ||
 		ed->xv->damp_angular != ed->rbe.damp_angular ||
-		ed->xv->max_angular != ed->rbe.max_angular)
+		ed->xv->max_angular != ed->rbe.max_angular ||
+		ed->xv->alloweddof != ed->rbe.alloweddof ||
+		!VectorCompare(ed->xv->gravitydir, ed->rbe.jolt_gravitydir))
 		modified = qtrue;
 
 	// store the qc values into the physics engine
 	if (modified && body)
 	{
 		// values for BodyFromEntity to check if the qc modified anything later
-		if (!VectorCompare(angles, ed->rbe.angles))
+		JPH::Mat44 basis(JPH::Vec4(forward[0], forward[1], forward[2], 0),
+			JPH::Vec4(left[0], left[1], left[2], 0), JPH::Vec4(up[0], up[1], up[2], 0), JPH::Vec4(0, 0, 0, 1));
+		body_interface.SetPositionAndRotation(body->GetID(), JPH::RVec3(origin[0], origin[1], origin[2]) * InchesToMeters,
+			basis.GetQuaternion(), body->IsStatic() ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
+		VectorCopy(origin, ed->rbe.origin);
+		VectorCopy(angles, ed->rbe.angles);
+		if (!body->IsStatic())
 		{
-			VectorCopy(angles, ed->rbe.angles);
-			body_interface.SetRotation(body->GetID(), JPH::Quat::sEulerAngles(JPH::Vec3Arg(DEG2RAD(angles[ROLL]), DEG2RAD(angles[PITCH]), DEG2RAD(angles[YAW]))), JPH::EActivation::Activate);
+			body_interface.SetLinearVelocity(body->GetID(), JPH::Vec3(velocity[0], velocity[1], velocity[2]) * InchesToMeters);
+			body_interface.SetAngularVelocity(body->GetID(), JPH::Vec3(spinvelocity[0], spinvelocity[1], spinvelocity[2]));
 		}
-
-		if (!VectorCompare(origin, ed->rbe.origin))
-		{
-			VectorCopy(origin, ed->rbe.origin);
-			body_interface.SetPosition(body->GetID(), JPH::Vec3Arg(origin[0], origin[1], origin[2]) * InchesToMeters, JPH::EActivation::DontActivate);
-		}
-
-		if (!VectorCompare(velocity, ed->rbe.velocity))
-		{
-			VectorCopy(velocity, ed->rbe.velocity);
-			body_interface.SetLinearVelocity(body->GetID(), JPH::Vec3Arg(velocity[0], velocity[1], velocity[2]) * InchesToMeters);
-		}
-
-		if (!VectorCompare(avelocity, ed->rbe.avelocity))
-		{
-			VectorCopy(avelocity, ed->rbe.avelocity);
-			body_interface.SetAngularVelocity(body->GetID(), JPH::Vec3Arg(spinvelocity[0], spinvelocity[1], spinvelocity[2]));
-		}
+		VectorCopy(velocity, ed->rbe.velocity);
+		VectorCopy(avelocity, ed->rbe.avelocity);
 
 		JPH::MotionProperties *motion_properties = body->GetMotionPropertiesUnchecked();
 
-		if (ed->xv->damp_linear != ed->rbe.damp_linear)
+		if (modified || ed->xv->damp_linear != ed->rbe.damp_linear)
 		{
 			ed->rbe.damp_linear = ed->xv->damp_linear;
 			if (motion_properties)
 				motion_properties->SetLinearDamping(ed->xv->damp_linear);
 		}
 
-		if (ed->xv->damp_angular != ed->rbe.damp_angular)
+		if (modified || ed->xv->damp_angular != ed->rbe.damp_angular)
 		{
 			ed->rbe.damp_angular = ed->xv->damp_angular;
 			if (motion_properties)
 				motion_properties->SetAngularDamping(ed->xv->damp_angular);
 		}
 
-		if (ed->xv->max_angular != ed->rbe.max_angular)
+		if (ed->xv->max_angular != ed->rbe.max_angular ||
+		modified || ed->xv->alloweddof != ed->rbe.alloweddof)
 		{
 			ed->rbe.max_angular = ed->xv->max_angular;
 			if (motion_properties)
 				motion_properties->SetMaxAngularVelocity(ed->xv->max_angular);
 		}
 
-		if (ed->xv->alloweddof != ed->rbe.alloweddof)
+		if (modified || ed->xv->alloweddof != ed->rbe.alloweddof)
 		{
 			ed->rbe.alloweddof = ed->xv->alloweddof;
 			if (motion_properties)
 			{
 				JPH::EAllowedDOFs alloweddof = JPH::EAllowedDOFs::None;
-				JPH::MassProperties mass_properties;
+				JPH::MassProperties mass_properties = ((JPH::Shape *)ed->rbe.body.geom)->GetMassProperties();
 
 				// TODO: translate coordinate space for rotations
 				if ((int)ed->xv->alloweddof == ALLOWEDDOF_ALL)
@@ -1199,11 +1221,14 @@ static void World_Jolt_BodyFromEntity(world_t *world, wedict_t *ed)
 		if (ed->xv->gravity != ed->rbe.gravity)
 		{
 			ed->rbe.gravity = ed->xv->gravity;
-			body_interface.SetGravityFactor(body->GetID(), ed->xv->gravity);
+			if (!body->IsStatic())
+				body_interface.SetGravityFactor(body->GetID(), ed->xv->gravity == 0 ? 1 : ed->xv->gravity);
 		}
 
+		VectorCopy(ed->xv->gravitydir, ed->rbe.jolt_gravitydir);
 		//something changed. make sure it still falls over appropriately
-		body_interface.ActivateBody(body->GetID());
+		if (!body->IsStatic())
+			body_interface.ActivateBody(body->GetID());
 	}
 }
 
@@ -1236,12 +1261,12 @@ static void World_Jolt_BodyToEntity(world_t *world, wedict_t *ed)
 	velocity[0] = v[0];
 	velocity[1] = v[1];
 	velocity[2] = v[2];
-	avelocity[PITCH] = RAD2DEG(a[YAW]);
-	avelocity[YAW] = RAD2DEG(a[ROLL]);
-	avelocity[ROLL] = RAD2DEG(a[PITCH]);
-	angles[PITCH] = RAD2DEG(qa[YAW]);
-	angles[YAW] = RAD2DEG(qa[ROLL]);
-	angles[ROLL] = RAD2DEG(qa[PITCH]);
+	avelocity[PITCH] = RAD2DEG(a[1]);
+	avelocity[YAW] = RAD2DEG(a[2]);
+	avelocity[ROLL] = RAD2DEG(a[0]);
+	angles[PITCH] = RAD2DEG(qa[1]);
+	angles[YAW] = RAD2DEG(qa[2]);
+	angles[ROLL] = RAD2DEG(qa[0]);
 
 	if (ed->v->modelindex)
 	{
@@ -1296,7 +1321,10 @@ static void World_Jolt_JointFromEntity(world_t *world, wedict_t *ed)
 
 	// nothing to do
 	if (ed->xv->jointtype == 0)
+	{
+		World_Jolt_RemoveJointFromEntity(world, ed);
 		return;
+	}
 
 	// can't have both
 	if (movetype == MOVETYPE_PHYSICS)
@@ -1319,7 +1347,7 @@ static void World_Jolt_JointFromEntity(world_t *world, wedict_t *ed)
 	}
 
 	// FIXME: ??
-	if (enemy == aiment)
+	if (!enemybody || !aimentbody || enemy == aiment)
 		return;
 
 	// FIXME: fucking darkplaces
@@ -1388,9 +1416,9 @@ static void World_Jolt_JointFromEntity(world_t *world, wedict_t *ed)
 		case JOINTTYPE_FIXED:
 		{
 			JPH::FixedConstraintSettings settings;
-			settings.mPoint1 = (origin - enemyorigin) * InchesToMeters;
-			settings.mPoint2 = (origin - aimentorigin) * InchesToMeters;
-			settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
+			settings.mPoint1 = origin * InchesToMeters;
+			settings.mPoint2 = origin * InchesToMeters;
+			settings.mSpace = JPH::EConstraintSpace::WorldSpace;
 
 			joint = new JPH::FixedConstraint(*enemybody, *aimentbody, settings);
 			break;
@@ -1399,9 +1427,9 @@ static void World_Jolt_JointFromEntity(world_t *world, wedict_t *ed)
 		case JOINTTYPE_POINT:
 		{
 			JPH::PointConstraintSettings settings;
-			settings.mPoint1 = (origin - enemyorigin) * InchesToMeters;
-			settings.mPoint2 = (origin - aimentorigin) * InchesToMeters;
-			settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
+			settings.mPoint1 = origin * InchesToMeters;
+			settings.mPoint2 = origin * InchesToMeters;
+			settings.mSpace = JPH::EConstraintSpace::WorldSpace;
 
 			joint = new JPH::PointConstraint(*enemybody, *aimentbody, settings);
 			break;
@@ -1410,9 +1438,9 @@ static void World_Jolt_JointFromEntity(world_t *world, wedict_t *ed)
 		case JOINTTYPE_HINGE:
 		{
 			JPH::HingeConstraintSettings settings;
-			settings.mPoint1 = (origin - enemyorigin) * InchesToMeters;
-			settings.mPoint2 = (origin - aimentorigin) * InchesToMeters;
-			settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
+			settings.mPoint1 = origin * InchesToMeters;
+			settings.mPoint2 = origin * InchesToMeters;
+			settings.mSpace = JPH::EConstraintSpace::WorldSpace;
 			settings.mHingeAxis1 = settings.mHingeAxis2 = JPH::Vec3(forward[0], forward[1], forward[2]);
 			settings.mNormalAxis1 = settings.mNormalAxis2 = settings.mHingeAxis1.GetNormalizedPerpendicular();
 
@@ -1423,9 +1451,9 @@ static void World_Jolt_JointFromEntity(world_t *world, wedict_t *ed)
 		case JOINTTYPE_SLIDER:
 		{
 			JPH::SliderConstraintSettings settings;
-			settings.mPoint1 = (origin - enemyorigin) * InchesToMeters;
-			settings.mPoint2 = (origin - aimentorigin) * InchesToMeters;
-			settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
+			settings.mPoint1 = origin * InchesToMeters;
+			settings.mPoint2 = origin * InchesToMeters;
+			settings.mSpace = JPH::EConstraintSpace::WorldSpace;
 			settings.mSliderAxis1 = settings.mSliderAxis2 = JPH::Vec3(forward[0], forward[1], forward[2]);
 			settings.mNormalAxis1 = settings.mNormalAxis2 = settings.mSliderAxis1.GetNormalizedPerpendicular();
 			settings.mLimitsMin = -stop;
@@ -1456,9 +1484,9 @@ static void QDECL World_Jolt_RunFrame(world_t *world, double frametime, double g
 		return;
 
 	// fix up cvars
-	if (physics_jolt_framerate->value <= 0)
+	if (!std::isfinite(physics_jolt_framerate->value) || physics_jolt_framerate->value <= 0)
 		cvarfuncs->SetFloat("physics_jolt_framerate", 60);
-	if (physics_jolt_maxiterationsperframe->value <= 0)
+	if (!std::isfinite(physics_jolt_maxiterationsperframe->value) || physics_jolt_maxiterationsperframe->value <= 0)
 		cvarfuncs->SetFloat("physics_jolt_maxiterationsperframe", 1);
 
 	// copy physics properties from entities to physics engine
@@ -1489,7 +1517,7 @@ static void QDECL World_Jolt_RunFrame(world_t *world, double frametime, double g
 	}
 
 	// set gravity
-	ctx->physics_system.SetGravity(JPH::Vec3Arg(0, 0, -gravity * InchesToMeters));
+	ctx->physics_system.SetGravity(JPH::Vec3::sZero());
 
 	// optimize broadphase only once
 	if (!ctx->broadphase_optimized)
@@ -1499,7 +1527,27 @@ static void QDECL World_Jolt_RunFrame(world_t *world, double frametime, double g
 	}
 
 	// step the world
-	ctx->physics_system.Update(1.0f/physics_jolt_framerate->value, physics_jolt_maxiterationsperframe->value, &ctx->temp_allocator, &ctx->job_system);
+	const double step = 1.0 / std::max(1.0, std::min(1000.0, (double)physics_jolt_framerate->value));
+	const int maxsteps = (int)std::max(1.0, std::min(64.0, (double)physics_jolt_maxiterationsperframe->value));
+	if (std::isfinite(frametime) && frametime > 0)
+		ctx->accumulator = std::min(ctx->accumulator + frametime, step * maxsteps);
+	for (int i = 0; i < maxsteps && ctx->accumulator + 1e-9 >= step; ++i)
+	{
+		// Per-entity gravity uses the same QC fields as native FTE movement.
+		for (unsigned int n = 1; n < world->num_edicts; ++n)
+		{
+			wedict_t *ed = WEDICT_NUM_PB(world->progs, n);
+			auto *body = (JPH::Body *)ed->rbe.body.body;
+			if (ED_ISFREE(ed) || !body || !body->IsDynamic() || !body->IsActive())
+				continue;
+			JPH::Vec3 direction(ed->xv->gravitydir[0], ed->xv->gravitydir[1], ed->xv->gravitydir[2]);
+			direction = direction.NormalizedOr(-JPH::Vec3::sAxisZ());
+			float strength = gravity * (ed->xv->gravity == 0 ? 1 : ed->xv->gravity) * InchesToMeters;
+			ctx->physics_system.GetBodyInterface().AddForce(body->GetID(), direction * (strength / body->GetMotionProperties()->GetInverseMass()));
+		}
+		ctx->physics_system.Update((float)step, 1, &ctx->temp_allocator, &ctx->job_system);
+		ctx->accumulator -= step;
+	}
 
 	// copy physics properties from physics engine to entities
 	for (unsigned int i = 0; i < world->num_edicts; i++)
@@ -1508,6 +1556,50 @@ static void QDECL World_Jolt_RunFrame(world_t *world, double frametime, double g
 		if (!ED_ISFREE(ed))
 			World_Jolt_BodyToEntity(world, ed);
 	}
+	if (world->Event_Touch)
+	{
+		std::sort(ctx->contacts.begin(), ctx->contacts.end(), [](const joltcontext::ContactEvent &a, const joltcontext::ContactEvent &b) {
+			return a.a.GetIndexAndSequenceNumber() != b.a.GetIndexAndSequenceNumber() ? a.a.GetIndexAndSequenceNumber() < b.a.GetIndexAndSequenceNumber() : a.b.GetIndexAndSequenceNumber() < b.b.GetIndexAndSequenceNumber();
+		});
+		JPH::BodyID last_a, last_b;
+		for (const auto &contact : ctx->contacts)
+		{
+			if (contact.a == last_a && contact.b == last_b)
+				continue;
+			last_a = contact.a; last_b = contact.b;
+			auto &bodies = ctx->physics_system.GetBodyInterface();
+			JPH::BodyLockRead lock_a(ctx->physics_system.GetBodyLockInterface(), contact.a);
+			if (!lock_a.Succeeded()) continue;
+			unsigned int na = (unsigned int)lock_a.GetBody().GetUserData();
+			lock_a.ReleaseLock();
+			JPH::BodyLockRead lock_b(ctx->physics_system.GetBodyLockInterface(), contact.b);
+			if (!lock_b.Succeeded()) continue;
+			unsigned int nb = (unsigned int)lock_b.GetBody().GetUserData();
+			lock_b.ReleaseLock();
+			if (na >= world->num_edicts || nb >= world->num_edicts) continue;
+			wedict_t *a = WEDICT_NUM_PB(world->progs, na), *b = WEDICT_NUM_PB(world->progs, nb);
+			trace_t trace = {};
+			for (int axis = 0; axis < 3; ++axis)
+			{
+				trace.endpos[axis] = contact.point[axis] * MetersToInches;
+				trace.plane.normal[axis] = -contact.normal[axis];
+			}
+			trace.ent = b;
+			if (a->v->touch)
+				world->Event_Touch(world, a, b, &trace);
+			// QC may remove or replace bodies in either callback.
+			if (!ED_ISFREE(a) && !ED_ISFREE(b) && a->rbe.body.body && b->rbe.body.body &&
+				((JPH::Body *)a->rbe.body.body)->GetID() == contact.a && ((JPH::Body *)b->rbe.body.body)->GetID() == contact.b)
+			{
+				trace.ent = a;
+				VectorNegate(trace.plane.normal, trace.plane.normal);
+				if (b->v->touch)
+					world->Event_Touch(world, b, a, &trace);
+			}
+		}
+	}
+	ctx->contacts.clear();
+
 }
 
 static void QDECL World_Jolt_PushCommand(world_t *world, rbecommandqueue_t *val)
@@ -1528,110 +1620,119 @@ static void QDECL World_Jolt_PushCommand(world_t *world, rbecommandqueue_t *val)
 	}
 }
 
-static void QDECL World_Jolt_Trace(world_t *world, wedict_t *ed, vec3_t start, vec3_t end, trace_t *trace)
+// Trace against simulated bodies; FTE keeps responsibility for ordinary BSP/world
+// traces. This callback receives the actual requested bounds, including traceline.
+static void QDECL World_Jolt_TraceMove(world_t *world, wedict_t *ed, vec3_t start,
+	vec3_t mins, vec3_t maxs, vec3_t end, int type, unsigned int contentsmask, trace_t *trace)
 {
-	joltcontext_t *ctx = (joltcontext_t *)world->rbe;
-	const JPH::NarrowPhaseQuery &query = ctx->physics_system.GetNarrowPhaseQuery();
-	JPH::BodyInterface &body_interface = ctx->physics_system.GetBodyInterface();
+	auto *ctx = (joltcontext_t *)world->rbe;
+	auto &query = ctx->physics_system.GetNarrowPhaseQuery();
+	auto &bodies = ctx->physics_system.GetBodyInterface();
+	if (type & MOVE_NOMONSTERS || !(contentsmask & (FTECONTENTS_SOLID | FTECONTENTS_BODY)))
+		return;
 
-	JPH::RRayCast ray;
-	ray.mOrigin = JPH::RVec3(start[0], start[1], start[2]) * InchesToMeters;
-	ray.mDirection = (JPH::RVec3(end[0], end[1], end[2]) - JPH::RVec3(start[0], start[1], start[2])) * InchesToMeters;
-	// Con_Printf("%f %f %f -> %f %f %f\n", ray.mOrigin[0], ray.mOrigin[1], ray.mOrigin[2], ray.mDirection[0], ray.mDirection[1], ray.mDirection[2]);
-	// Con_Printf("start=%f %f %f end=%f %f %f frac=%f\n", start[0], start[1], start[2], end[0], end[1], end[2], trace->fraction);
-
-	class BodyFilterImpl : public JPH::BodyFilter {
+	class Filter : public JPH::BodyFilter
+	{
 	public:
-		virtual bool ShouldCollide(const JPH::BodyID &inBodyID) const
+		world_t *world;
+		wedict_t *self;
+		JPH::BodyInterface *bodies;
+		bool ShouldCollide(const JPH::BodyID &id) const override
 		{
-			wedict_t *touch = WEDICT_NUM_PB(mWorld->progs, mBodyInterface->GetUserData(inBodyID));
-
-			if (mSelf->rbe.body.body && (((JPH::Body *)mSelf->rbe.body.body)->GetID() == inBodyID))
-				return false; // don't clip against own body
-			if (mSelf == touch)
-				return false; // don't clip against self
-			if (!((int)mSelf->xv->dimension_hit & (int)touch->xv->dimension_solid))
-				return false; // respect dimension value
-			if ((wedict_t *)PROG_TO_EDICT(mWorld->progs, touch->v->owner) == mSelf)
-				return false; // don't clip against own missiles
-			if ((wedict_t *)PROG_TO_EDICT(mWorld->progs, mSelf->v->owner) == touch)
-				return false; // don't clip against owner
-			if (touch->v->movetype != MOVETYPE_PHYSICS)
-				return false; // only touch physics objects anyway
-
+			unsigned int num = (unsigned int)bodies->GetUserData(id);
+			if (num >= world->num_edicts)
+				return false;
+			wedict_t *other = WEDICT_NUM_PB(world->progs, num);
+			if (ED_ISFREE(other) || other == self || other->v->movetype != MOVETYPE_PHYSICS || other->v->solid == SOLID_NOT || other->v->solid == SOLID_TRIGGER)
+				return false;
+			if (self)
+			{
+				if (!((int)self->xv->dimension_hit & (int)other->xv->dimension_solid))
+					return false;
+				if (PROG_TO_WEDICT(world->progs, other->v->owner) == self || PROG_TO_WEDICT(world->progs, self->v->owner) == other)
+					return false;
+			}
 			return true;
 		}
-		world_t *mWorld = nullptr;
-		wedict_t *mSelf = nullptr;
-		JPH::BodyInterface *mBodyInterface;
-	} body_filter;
-
-	body_filter.mWorld = world;
-	body_filter.mSelf = ed;
-	body_filter.mBodyInterface = &body_interface;
-
-	JPH::BroadPhaseLayerFilter broadphase_layer_filter;
-	JPH::ObjectLayerFilter object_layer_filter;
-
-	JPH::RayCastSettings ray_settings;
-	// ray_settings.SetBackFaceMode(JPH::EBackFaceMode::CollideWithBackFaces);
-	// ray_settings.mTreatConvexAsSolid = false;
-
-	class CastRayCollectorImpl : public JPH::CastRayCollector {
-	public:
-		virtual void AddHit(const JPH::RayCastResult &inResult) override
-		{
-			if (inResult.mFraction == 0.0f)
-				mStartSolid = qtrue;
-
-			mHits.push_back(inResult);
-		}
-		void Sort()
-		{
-			JPH::QuickSort(mHits.begin(), mHits.end(), [](const JPH::RayCastResult &inLHS, const JPH::RayCastResult &inRHS) { return inLHS.GetEarlyOutFraction() < inRHS.GetEarlyOutFraction(); });
-		}
-		JPH::Array<JPH::RayCastResult> mHits;
-		qboolean mStartSolid = qfalse;
-	} collector;
-
-	collector.UpdateEarlyOutFraction(trace->fraction);
-
-	query.CastRay(ray, ray_settings, collector, broadphase_layer_filter, object_layer_filter, body_filter);
-	collector.Sort();
-
-	// go over actual hits
-	for (auto &result : collector.mHits)
+	} filter;
+	filter.world = world;
+	filter.self = ed;
+	filter.bodies = &bodies;
+	JPH::Vec3 delta = JPH::Vec3(end[0]-start[0], end[1]-start[1], end[2]-start[2]) * InchesToMeters;
+	JPH::RVec3 origin = JPH::RVec3(start[0], start[1], start[2]) * InchesToMeters;
+	JPH::RefConst<JPH::Shape> shape;
+	bool point = VectorCompare(mins, maxs);
+	if (point)
+		shape = new JPH::SphereShape(0.000001f);
+	else
+		shape = new JPH::BoxShape(JPH::Vec3(std::max(0.000002f, (maxs[0]-mins[0])*InchesToMeters),
+			std::max(0.000002f, (maxs[1]-mins[1])*InchesToMeters), std::max(0.000002f, (maxs[2]-mins[2])*InchesToMeters)) * 0.5f, 0);
+	origin += JPH::Vec3((mins[0]+maxs[0])*0.5f, (mins[1]+maxs[1])*0.5f, (mins[2]+maxs[2])*0.5f)*InchesToMeters;
+	JPH::RMat44 transform = JPH::RMat44::sTranslation(origin);
+	JPH::CollideShapeSettings overlapsettings;
+	overlapsettings.mMaxSeparationDistance = 0;
+	JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> overlap;
+	query.CollideShape(shape, JPH::Vec3::sReplicate(1), transform, overlapsettings, origin, overlap, {}, {}, filter);
+	bool startsolid = false;
+	for (const auto &hit : overlap.mHits)
+		if (hit.mPenetrationDepth > 0.00001f || point)
+			startsolid = true;
+	if (startsolid)
 	{
-		// Con_Printf("HIT fraction=%f startsolid=%d\n", result.mFraction, collector.mStartSolid);
-
-		if (collector.mStartSolid)
-			result.mFraction = 1.0f;
-
-		memset(trace, 0, sizeof(*trace));
-		trace->fraction = trace->truefraction = result.mFraction;
-		JPH::RVec3 endpos = ray.GetPointOnRay(result.mFraction);
-		trace->endpos[0] = endpos[0] * MetersToInches;
-		trace->endpos[1] = endpos[1] * MetersToInches;
-		trace->endpos[2] = endpos[2] * MetersToInches;
-		trace->ent = WEDICT_NUM_PB(world->progs, body_interface.GetUserData(result.mBodyID));
-		trace->startsolid = collector.mStartSolid;
-
-		// ugh
-		const JPH::BodyLockInterface &lock_interface = ctx->physics_system.GetBodyLockInterface();
-		JPH::BodyLockRead lock(lock_interface, result.mBodyID);
-		if (lock.Succeeded())
-		{
-			const JPH::Body &body = lock.GetBody();
-			JPH::Vec3 n = body.GetWorldSpaceSurfaceNormal(result.mSubShapeID2, endpos);
-			trace->plane.normal[0] = n[0];
-			trace->plane.normal[1] = n[1];
-			trace->plane.normal[2] = n[2];
-
-			lock.ReleaseLock();
-		}
-
+		trace->startsolid = qtrue;
+		JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> endoverlap;
+		query.CollideShape(shape, JPH::Vec3::sReplicate(1), transform.PostTranslated(delta), overlapsettings, origin + delta, endoverlap, {}, {}, filter);
+		for (const auto &hit : endoverlap.mHits)
+			if ((hit.mPenetrationDepth > 0.00001f || point) && std::any_of(overlap.mHits.begin(), overlap.mHits.end(),
+				[&](const JPH::CollideShapeResult &start) { return start.mBodyID2 == hit.mBodyID2 && start.mSubShapeID2 == hit.mSubShapeID2; }))
+			{
+				trace->allsolid = qtrue;
+				trace->fraction = trace->truefraction = 0;
+				VectorCopy(start, trace->endpos);
+				trace->ent = WEDICT_NUM_PB(world->progs, bodies.GetUserData(hit.mBodyID2));
+				return;
+			}
+		// Quake permits escaping from a solid start. Keep the native world trace.
+		return;
+	}
+	if (delta.LengthSq() == 0)
+		return;
+	JPH::AllHitCollisionCollector<JPH::CastShapeCollector> hits;
+	JPH::ShapeCastSettings settings;
+	settings.mReturnDeepestPoint = true;
+	query.CastShape(JPH::RShapeCast(shape, JPH::Vec3::sReplicate(1), transform, delta), settings, origin, hits, {}, {}, filter);
+	hits.Sort();
+	for (const auto &hit : hits.mHits)
+	{
+		if (hit.mFraction >= trace->fraction)
+			break;
+		JPH::Vec3 normal = -hit.mPenetrationAxis.NormalizedOr(JPH::Vec3::sAxisZ());
+		if (normal.Dot(delta) >= 0)
+			continue; // tangent or moving away from an initial contact
+		trace->fraction = trace->truefraction = std::max(0.0f, hit.mFraction);
+		VectorInterpolate(start, trace->fraction, end, trace->endpos);
+		trace->plane.normal[0] = normal[0];
+		trace->plane.normal[1] = normal[1];
+		trace->plane.normal[2] = normal[2];
+		trace->plane.dist = DotProduct(trace->plane.normal, trace->endpos);
+		trace->ent = WEDICT_NUM_PB(world->progs, bodies.GetUserData(hit.mBodyID2));
+		trace->contents = FTECONTENTS_BODY;
 		break;
 	}
+}
+
+static qboolean QDECL World_Jolt_GetBounds(world_t *world, wedict_t *ed, vec3_t mins, vec3_t maxs)
+{
+	auto *body = (JPH::Body *)ed->rbe.body.body;
+	if (!body)
+		return qfalse;
+	const auto &bounds = body->GetWorldSpaceBounds();
+	for (int i = 0; i < 3; ++i)
+	{
+		mins[i] = bounds.mMin[i] * MetersToInches;
+		maxs[i] = bounds.mMax[i] * MetersToInches;
+	}
+	return qtrue;
 }
 
 static void QDECL World_Jolt_Start(world_t *world)
@@ -1658,12 +1759,17 @@ static void QDECL World_Jolt_Start(world_t *world)
 #endif
 	ctx->funcs.RunFrame = World_Jolt_RunFrame;
 	ctx->funcs.PushCommand = World_Jolt_PushCommand;
-	ctx->funcs.Trace = World_Jolt_Trace;
+	ctx->funcs.TraceMove = World_Jolt_TraceMove;
+	ctx->funcs.GetBounds = World_Jolt_GetBounds;
 	world->rbe = (rigidbodyengine_t *)ctx;
+
+	ctx->contact_filter.world = world;
+	ctx->contact_filter.ctx = ctx;
+	ctx->physics_system.SetContactListener(&ctx->contact_filter);
 
 	// init jobs system
 	// TODO: use FTE threads
-	ctx->job_system.Init(ctx->max_physics_jobs, ctx->max_physics_barriers);
+	ctx->job_system.Init(ctx->max_physics_jobs, ctx->max_physics_barriers, 2);
 
 	// init physics system
 	ctx->physics_system.Init(
@@ -1676,6 +1782,11 @@ static void QDECL World_Jolt_Start(world_t *world)
 		ctx->object_vs_object_layer_filter
 	);
 
+	JPH::PhysicsSettings settings = ctx->physics_system.GetPhysicsSettings();
+	settings.mPenetrationSlop = 0.02f * InchesToMeters;
+	settings.mMaxPenetrationDistance = 2.0f * InchesToMeters;
+	settings.mSpeculativeContactDistance = 0.1f * InchesToMeters;
+	ctx->physics_system.SetPhysicsSettings(settings);
 	ctx->broadphase_optimized = qfalse;
 }
 
@@ -1696,7 +1807,6 @@ static bool Plug_Jolt_AssertFailedImpl(const char *inExpression, const char *inM
 	char buffer[1024];
 	Q_snprintfz(buffer, sizeof(buffer), "%s:%d: (%s) %s", inFile, inLine, inExpression, inMessage ? inMessage : "");
 	Con_Printf("Jolt: %.1024s\n", buffer);
-	Plug_Jolt_Shutdown();
 	return false;
 }
 #endif // JPH_ENABLE_ASSERTS
@@ -1745,7 +1855,7 @@ extern "C" qboolean Plug_Init(void)
 	}
 
 	// get cvars
-	physics_jolt_maxiterationsperframe = cvarfuncs->GetNVFDG("physics_jolt_maxiterationsperframe", "1", 0, "Maximum times to run the simulation per frame", "Jolt");
+	physics_jolt_maxiterationsperframe = cvarfuncs->GetNVFDG("physics_jolt_maxiterationsperframe", "8", 0, "Maximum times to run the simulation per frame", "Jolt");
 	physics_jolt_framerate = cvarfuncs->GetNVFDG("physics_jolt_framerate", "60", 0, "Physics framerate", "Jolt");
 	pr_meshpitch = cvarfuncs->GetNVFDG("r_meshpitch", "-1", 0, "", "Jolt");
 
