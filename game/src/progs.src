@@ -6,7 +6,7 @@
 // #define NETQUAKE
 // #define FTE
 #define MONSTERS
-#define REPLACEMENTS
+// #define REPLACEMENTS
 
 // compile options
 #ifdef NETQUAKE
@@ -24,6 +24,7 @@
 #include "defs.qc"
 #include "subs.qc"
 #include "engine.qc"
+#include "escher.qc"
 #include "effects.qc"
 #include "obituary.qc"
 #include "combat.qc"

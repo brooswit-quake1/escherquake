@@ -1433,6 +1433,8 @@ static void CL_BaseMove (vec3_t moves, int pnum)
 	moves[2] *= scale;
 }
 
+#include "escher_view.h"
+
 void CL_ClampPitch (int pnum, float frametime)
 {
 	float mat[16];
@@ -1444,7 +1446,21 @@ void CL_ClampPitch (int pnum, float frametime)
 		memset(pv->viewanglechange, 0, sizeof(pv->viewanglechange));
 		return;
 	}
- 	if (pv->pmovetype == PM_6DOF)
+	/* Carry gaze with the gravity frame, preserving local yaw/pitch through wall and ceiling turns. */
+	if (pv->pmovetype != PM_6DOF && DotProduct(pv->gravitydir, pv->gravitydir) > 0.5f)
+	{
+		if (DotProduct(pv->escher_viewgravity, pv->escher_viewgravity) > 0.5f)
+		{
+			vec3_t forward, up;
+			AngleVectors(pv->viewangles, forward, NULL, up);
+			Escher_ViewTransport(pv->escher_viewgravity, pv->gravitydir, forward);
+			Escher_ViewTransport(pv->escher_viewgravity, pv->gravitydir, up);
+			VectorAngles(forward, up, pv->viewangles, false);
+		}
+		VectorCopy(pv->gravitydir, pv->escher_viewgravity);
+	}
+
+	if (pv->pmovetype == PM_6DOF)
 	{
 //		vec3_t impact;
 //		vec3_t norm;

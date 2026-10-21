@@ -1,0 +1,20 @@
+// Include this alongside your normal Quake entity definitions in TrenchBroom.
+@BaseClass = EscherField [
+    targetname(string) : "Name for toggling this field"
+    priority(integer) : "Priority (higher wins)" : 0
+    gravity_strength(float) : "Acceleration in units/s squared" : 800
+    gravity_zero(choices) : "Zero acceleration" : 0 = [0 : "No" 1 : "Yes"]
+    gravity_transition(float) : "Seconds per half-turn (negative = instant)" : 0.75
+    gravity_disabled(choices) : "Initially disabled" : 0 = [0 : "No" 1 : "Yes"]
+]
+@SolidClass base(EscherField) color(120 200 255) = trigger_gravity : "Directional gravity volume" [
+    gravity_up(string) : "World-space up vector" : "0 0 1"
+]
+@PointClass base(EscherField) color(255 180 80) size(-8 -8 -8, 8 8 8) = info_gravity : "Point or line gravity field" [
+    target(target_destination) : "Next point (optional finite segment)"
+    gravity_radius(float) : "Influence radius" : 256
+    gravity_inward(choices) : "Up direction" : 0 = [0 : "Away from source (attracts)" 1 : "Toward source (repels)"]
+]
+@PointClass color(180 255 120) size(-8 -8 -8, 8 8 8) = info_gravity_target : "Line endpoint with no field" [
+    targetname(target_source) : "Endpoint name"
+]

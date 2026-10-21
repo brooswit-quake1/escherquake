@@ -703,6 +703,7 @@ struct playerview_s
 	short		baseangles[3];		//networked angles are relative to this value
 	vec3_t		intermissionangles;	//absolute angles for intermission
 	vec3_t		gravitydir;
+	vec3_t		escher_viewgravity; // previous gravity frame for gaze transport
 
 	// pitch drifting vars
 	float		pitchvel;

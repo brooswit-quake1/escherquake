@@ -502,11 +502,14 @@ void PM_Friction (void)
 	speed = Length(pmove.velocity);
 	if (speed < 1)
 	{
-//fixme: gravitydir fix needed
-		pmove.velocity[0] = 0;
-		pmove.velocity[1] = 0;
+/* Remove tangent drift, preserving the component along local gravity. */
 		if (pmove.pm_type == PM_FLY || pmove.pm_type == PM_6DOF)
-			pmove.velocity[2] = 0;
+			VectorClear(pmove.velocity);
+		else
+		{
+			float vertical = DotProduct(pmove.velocity, pmove.gravitydir);
+			VectorScale(pmove.gravitydir, vertical, pmove.velocity);
+		}
 		return;
 	}
 
@@ -523,12 +526,16 @@ void PM_Friction (void)
 		if (movevars.edgefriction != 1.0)
 		{
 			// if the leading edge is over a dropoff, increase friction
-			start[0] = stop[0] = pmove.origin[0] + pmove.velocity[0]/speed*16;
-			start[1] = stop[1] = pmove.origin[1] + pmove.velocity[1]/speed*16;
-			//FIXME: gravitydir.
-			//id quirk: this is a tracebox, NOT a traceline, yet still starts BELOW the player.
-			start[2] = pmove.origin[2] + pmove.player_mins[2];
-			stop[2] = start[2] - 34;
+			vec3_t tangent;
+			float foot = 0;
+			int axis;
+			VectorMA(pmove.velocity, -DotProduct(pmove.velocity, pmove.gravitydir), pmove.gravitydir, tangent);
+			VectorNormalize(tangent);
+			for (axis = 0; axis < 3; axis++)
+				foot += pmove.gravitydir[axis] * (pmove.gravitydir[axis] >= 0 ? pmove.player_maxs[axis] : pmove.player_mins[axis]);
+			VectorMA(pmove.origin, 16, tangent, start);
+			VectorMA(start, foot, pmove.gravitydir, start);
+			VectorMA(start, 34, pmove.gravitydir, stop);
 			if (movevars.flags & MOVEFLAG_QWEDGEBOX)	//vanilla qw behaviour is to use a tracebox, which makes edge friction almost unnoticable.
 				trace = PM_PlayerTrace (start, stop, MASK_PLAYERSOLID);
 			else

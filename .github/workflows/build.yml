@@ -1,0 +1,25 @@
+name: build-and-test
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y build-essential libpng-dev libjpeg-dev libx11-dev libgl-dev libxcursor-dev libxrandr-dev libxxf86vm-dev libxrender-dev libxfixes-dev libxi-dev libxss-dev libxv-dev libasound2-dev libvorbis-dev libfreetype-dev libopus-dev libspeex-dev libspeexdsp-dev zlib1g-dev
+      - run: make all JOBS=4
+      - run: make test JOBS=4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: escherquake-linux
+          path: |
+            vendor/fteqw/engine/release/fteqw-gl
+            vendor/fteqw/engine/release/fteqw-sv
+            game/qwprogs.dat
+            game/escher.cfg
+            game/escher.fgd
+            game/maps/
+            game/textures/
+            LICENSE
+            README.md

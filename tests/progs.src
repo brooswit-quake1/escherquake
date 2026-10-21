@@ -1,0 +1,5 @@
+#define worldspawn Original_worldspawn
+#include "../game/src/progs.src"
+#undef worldspawn
+#pragma PROGS_DAT ../build/testgame/qwprogs.dat
+#include "gravity_tests.qc"

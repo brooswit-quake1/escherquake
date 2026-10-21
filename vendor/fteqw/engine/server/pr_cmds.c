@@ -4984,7 +4984,7 @@ vector aim(entity, missilespeed)
 void QCBUILTIN PF_aim (pubprogfuncs_t *prinst, struct globalvars_s *pr_globals)
 {
 	edict_t	*ent, *check, *bestent;
-	vec3_t	start, dir, end, bestdir;
+	vec3_t	start, dir, end, bestdir, down;
 	int		i, j;
 	trace_t	tr;
 	float	dist, bestdist;
@@ -5009,7 +5009,9 @@ void QCBUILTIN PF_aim (pubprogfuncs_t *prinst, struct globalvars_s *pr_globals)
 
 
 	VectorCopy (ent->v->origin, start);
-	start[2] += ent->v->view_ofs[2]; //the view position is at 22, but the gun position is normally at 16.
+	VectorCopy(ent->xv->gravitydir, down);
+	if (!VectorNormalize(down)) VectorSet(down, 0, 0, -1);
+	VectorMA(start, -ent->v->view_ofs[2], down, start);
 
 // try sending a trace straight
 	VectorCopy (P_VEC(v_forward), dir);
@@ -5058,7 +5060,7 @@ void QCBUILTIN PF_aim (pubprogfuncs_t *prinst, struct globalvars_s *pr_globals)
 		VectorSubtract (bestent->v->origin, ent->v->origin, dir);
 		dist = DotProduct (dir, P_VEC(v_forward));
 		VectorScale (P_VEC(v_forward), dist, end);
-		end[2] = dir[2];
+		VectorMA(end, DotProduct(dir, down)-DotProduct(end, down), down, end);
 		VectorNormalize (end);
 		VectorCopy (end, G_VECTOR(OFS_RETURN));
 	}

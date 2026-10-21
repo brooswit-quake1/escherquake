@@ -7530,6 +7530,7 @@ static void CL_ParseBaseAngle(int seat)
 		{
 			inf->packet_entities.fixangles[seat] = true;
 			VectorCopy (newang, inf->packet_entities.fixedangles[seat]);
+			VectorClear(cl.playerview[seat].escher_viewgravity);
 		}
 		VectorCopy (newang, cl.playerview[seat].viewangles);
 	}
@@ -7859,6 +7860,7 @@ void CLQW_ParseServerMessage (void)
 					inf->packet_entities.fixangles[destsplit] = true;
 					VectorCopy (ang, cl.playerview[destsplit].viewangles);
 					VectorCopy (ang, inf->packet_entities.fixedangles[destsplit]);
+					VectorClear(cl.playerview[destsplit].escher_viewgravity);
 				}
 				VectorCopy (cl.playerview[destsplit].viewangles, cl.playerview[destsplit].intermissionangles);
 			}
@@ -9825,6 +9827,7 @@ void CLNQ_ParseServerMessage (void)
 					inf->packet_entities.fixangles[destsplit] = true;
 					VectorCopy (ang, cl.playerview[destsplit].viewangles);
 					VectorCopy (ang, inf->packet_entities.fixedangles[destsplit]);
+					VectorClear(cl.playerview[destsplit].escher_viewgravity);
 				}
 				VectorCopy (cl.playerview[destsplit].viewangles, cl.playerview[destsplit].intermissionangles);
 				VRUI_SnapAngle();

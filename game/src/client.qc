@@ -633,6 +633,10 @@ void() PutClientInServer =
 	
 	spot = SelectSpawnPoint ();
 
+	self.gravitydir = '0 0 -1';
+	self.gravity = 1;
+	self.escher_active = 0;
+	self.escher_strength = cvar("sv_gravity");
 	self.origin = spot.origin + '0 0 1';
 	self.angles = spot.angles;
 	self.fixangle = TRUE;           // turn this way immediately
@@ -856,7 +860,7 @@ void() PlayerJump =
 	sound (self, CHAN_BODY, "player/plyrjmp8.wav", 1, ATTN_NORM);
 #ifdef NETQUAKE
 	self.flags = self.flags - FL_ONGROUND;
-	self.velocity_z = self.velocity_z + 270;
+	self.velocity = self.velocity - Escher_Down(self) * 270;
 #endif
 };
 
@@ -1225,7 +1229,7 @@ void() PlayerPostThink =
 			sound (self, CHAN_VOICE, "player/land.wav", 1, ATTN_NORM);
 	}
 
-	self.jump_flag = self.velocity_z;
+	self.jump_flag = self.velocity * (0 - Escher_Down(self));
 
 	CheckPowerups ();
 

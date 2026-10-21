@@ -341,6 +341,7 @@ void() worldspawn =
 
 void() StartFrame =
 {
+	Escher_Frame();
 	timelimit = cvar("timelimit") * 60;
 	fraglimit = cvar("fraglimit");
 #ifdef NETQUAKE

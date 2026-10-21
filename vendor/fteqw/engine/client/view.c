@@ -1717,6 +1717,16 @@ void V_CalcRefdef (playerview_t *pv)
 		VectorMA(r_refdef.vieworg, v_gunkick.value, pv->punchorigin, r_refdef.vieworg);
 	}
 
+	/* A gravity-relative eye can extend beyond a legacy axis-aligned hull on walls.
+	 * Keep the camera in visible space instead of exposing the back of the BSP. */
+	if (pv->gravitydir[2] != -1)
+	{
+		vec3_t impact, normal;
+		int hitent;
+		if (CL_TraceLine(pv->simorg, r_refdef.vieworg, impact, normal, &hitent) < 1)
+			VectorMA(impact, 0.5f, normal, r_refdef.vieworg);
+	}
+
 	if (v_skyroom_set)
 	{
 		r_refdef.skyroom_enabled = true;

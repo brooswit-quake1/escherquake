@@ -68,7 +68,7 @@ void() W_FireAxe =
 	local   vector  org;
 
 	makevectors (self.v_angle);
-	source = self.origin + '0 0 16';
+	source = self.origin - Escher_Down(self)*16;
 	traceline (source, source + v_forward*64, FALSE, self);
 	if (trace_fraction == 1.0)
 		return;
@@ -111,7 +111,7 @@ void(vector org, vector vel) SpawnMeatSpray =
 	makevectors (self.angles);
 
 	missile.velocity = vel;
-	missile.velocity_z = missile.velocity_z + 250 + 50*random();
+	missile.velocity = missile.velocity - Escher_Down(self)*(250 + 50*random());
 
 	missile.avelocity = '3000 1000 2000';
 	
@@ -333,7 +333,7 @@ void() W_FireRocket =
 	VK_smallkick(self);
 	PRJ_FireProjectile(self, 
 		"progs/missile.mdl", 
-		self.origin + v_forward*8 + '0 0 16', 
+		self.origin + v_forward*8 - Escher_Down(self)*16,
 		aim(self, 1000) * 1000,
 		PE_EXPLOSION, 
 		100+random()*20, 
@@ -440,7 +440,7 @@ void() W_FireLightning =
 		W_UpdateAmmoCounts(self);
 	}
 
-	org = self.origin + '0 0 16';
+	org = self.origin - Escher_Down(self)*16;
 	
 	traceline (org, org + v_forward*600, TRUE, self);
 
@@ -466,13 +466,9 @@ void() W_FireGrenade =
 	
 	sound (self, CHAN_WEAPON, "weapons/grenade.wav", 1, ATTN_NORM);
 
-	if (self.v_angle_x)
-		vel = v_forward*600 + v_up * 200 + crandom()*v_right*10 + crandom()*v_up*10;
-	else
-	{
-		vel = aim(self, 10000) * 600;
-		vel_z = 200;
-	}
+	// The launch arc follows local up at every pitch, including on walls/ceilings.
+	makevectors(self.v_angle);
+	vel = v_forward*600 - Escher_Down(self)*200 + crandom()*v_right*10;
 
 	VK_smallkick(self);
 	PRJ_FireProjectile(self, "progs/grenade.mdl", self.origin, vel, PE_EXPLOSIONGROUND, 0, 0, 2.5);
@@ -506,7 +502,7 @@ void(float ox) W_FireSpikes =
 	VK_smallkick(self);
 	PRJ_FireProjectile(self,
 		"progs/spike.mdl",
-		self.origin + '0 0 16' + v_right*ox,
+		self.origin - Escher_Down(self)*16 + v_right*ox,
 		aim(self, 1000) * 1000,
 		PE_SPIKE,
 		9,
@@ -532,7 +528,7 @@ void() W_FireSuperSpikes =
 	VK_smallkick(self);
 	PRJ_FireProjectile(self,
 		"progs/s_spike.mdl",
-		self.origin + '0 0 16',
+		self.origin - Escher_Down(self)*16,
 		aim(self, 1000) * 1000,
 		PE_SUPERSPIKE,
 		18,
